@@ -1,25 +1,17 @@
 """AWS Bedrock LLM integration for natural-language to SQL pipeline.
 
-Supports three auth modes (checked in order):
-  1. BEDROCK_API_KEY env var — direct HTTPS with Bearer token (simplest)
-  2. AWS_BEARER_TOKEN_BEDROCK env var — presigned-URL bearer token
-  3. Standard IAM credentials via boto3 (fallback)
-
-Supports model families:
-  - Amazon Nova (us.amazon.nova-*) — default, no marketplace subscription needed
-  - Anthropic Claude (us.anthropic.claude-*) — requires marketplace subscription
+Uses boto3 with IAM role credentials (EC2 instance profile).
+Supports model families: Amazon Nova, Anthropic Claude, Meta Llama.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import os
 import re
-import ssl
-import urllib.parse
-import urllib.request
 from typing import Any, Optional, List, Dict
+
+import boto3
 
 import config
 from schema import SYSTEM_PROMPT
@@ -27,8 +19,7 @@ from schema import SYSTEM_PROMPT
 logger = logging.getLogger(__name__)
 
 _client = None
-_auth_mode: str = "none"
-_model_family: str = "nova"  # "nova", "claude", or "other"
+_model_family: str = "nova"
 
 
 def _detect_model_family() -> str:
@@ -40,49 +31,25 @@ def _detect_model_family() -> str:
         return "claude"
     elif "llama" in mid or "meta" in mid:
         return "llama"
-    elif "mistral" in mid:
-        return "mistral"
     return "nova"
 
 
 def init_client():
-    """Initialize the Bedrock Runtime client."""
-    global _client, _auth_mode, _model_family
-
+    """Initialize the Bedrock Runtime client using IAM role credentials."""
+    global _client, _model_family
     _model_family = _detect_model_family()
-
-    if config.BEDROCK_API_KEY:
-        _auth_mode = "api_key"
-        logger.info(
-            "Bedrock auth: API Key (region=%s, model=%s, family=%s)",
-            config.AWS_REGION, config.BEDROCK_MODEL_ID, _model_family,
-        )
-        return
-
-    bearer = os.environ.get("AWS_BEARER_TOKEN_BEDROCK", "").strip()
-    if bearer:
-        _auth_mode = "bearer"
-        logger.info(
-            "Bedrock auth: Bearer Token (region=%s, model=%s, family=%s)",
-            config.AWS_REGION, config.BEDROCK_MODEL_ID, _model_family,
-        )
-        return
-
-    import boto3
     _client = boto3.client("bedrock-runtime", region_name=config.AWS_REGION)
-    _auth_mode = "boto3"
     logger.info(
-        "Bedrock auth: boto3 IAM (region=%s, model=%s, family=%s)",
+        "Bedrock client initialized via IAM role (region=%s, model=%s, family=%s)",
         config.AWS_REGION, config.BEDROCK_MODEL_ID, _model_family,
     )
 
 
 # ── Request/Response format adapters ──────────────────────────────────
 
-def _build_request_body(messages: List[Dict], temperature: float, max_tokens: int) -> bytes:
+def _build_request_body(messages: List[Dict], temperature: float, max_tokens: int) -> str:
     """Build the correct request body based on model family."""
     if _model_family == "nova":
-        # Nova uses Converse-style: system as list of text objects, messages with content as list
         nova_messages = []
         for msg in messages:
             content = msg["content"]
@@ -97,7 +64,7 @@ def _build_request_body(messages: List[Dict], temperature: float, max_tokens: in
                 "maxTokens": max_tokens,
                 "temperature": temperature,
             },
-        }).encode("utf-8")
+        })
 
     elif _model_family == "claude":
         return json.dumps({
@@ -106,10 +73,10 @@ def _build_request_body(messages: List[Dict], temperature: float, max_tokens: in
             "temperature": temperature,
             "system": SYSTEM_PROMPT,
             "messages": messages,
-        }).encode("utf-8")
+        })
 
     else:
-        # Generic fallback — Nova format
+        # Default to Nova format
         nova_messages = []
         for msg in messages:
             content = msg["content"]
@@ -124,7 +91,7 @@ def _build_request_body(messages: List[Dict], temperature: float, max_tokens: in
                 "maxTokens": max_tokens,
                 "temperature": temperature,
             },
-        }).encode("utf-8")
+        })
 
 
 def _extract_text(response_body: dict) -> str:
@@ -135,84 +102,32 @@ def _extract_text(response_body: dict) -> str:
         return response_body["content"][0]["text"]
     elif _model_family == "llama":
         return response_body.get("generation", "")
-    else:
-        # Try common paths
-        if "output" in response_body:
-            return response_body["output"]["message"]["content"][0]["text"]
-        if "content" in response_body:
-            return response_body["content"][0]["text"]
-        return str(response_body)
+    # Fallback
+    if "output" in response_body:
+        return response_body["output"]["message"]["content"][0]["text"]
+    if "content" in response_body:
+        return response_body["content"][0]["text"]
+    return str(response_body)
 
 
-# ── Invocation backends ───────────────────────────────────────────────
+# ── Invocation ────────────────────────────────────────────────────────
 
-def _build_bedrock_url() -> str:
-    model_enc = urllib.parse.quote(config.BEDROCK_MODEL_ID, safe="")
-    return (
-        f"https://bedrock-runtime.{config.AWS_REGION}.amazonaws.com"
-        f"/model/{model_enc}/invoke"
-    )
+def _invoke(messages: List[Dict], temperature: float = 0.1, max_tokens: int = 4096) -> str:
+    """Call Bedrock via boto3 using IAM role credentials."""
+    if _client is None:
+        raise RuntimeError("LLM client not initialized — call init_client() first")
 
-
-def _invoke_api_key(messages: List[Dict], temperature: float, max_tokens: int) -> str:
-    """Call Bedrock Runtime with API Key bearer auth."""
-    url = _build_bedrock_url()
-    payload = _build_request_body(messages, temperature, max_tokens)
-
-    req = urllib.request.Request(url, data=payload, method="POST")
-    req.add_header("Content-Type", "application/json")
-    req.add_header("Accept", "application/json")
-    req.add_header("Authorization", f"Bearer {config.BEDROCK_API_KEY}")
-
-    ctx = ssl.create_default_context()
-    logger.debug("API-Key invoke: POST %s (%d bytes)", url, len(payload))
-
-    with urllib.request.urlopen(req, context=ctx, timeout=180) as resp:
-        result = json.loads(resp.read())
-        return _extract_text(result)
-
-
-def _invoke_bearer(messages: List[Dict], temperature: float, max_tokens: int) -> str:
-    """Call Bedrock Runtime with presigned-URL bearer token."""
-    bearer = os.environ["AWS_BEARER_TOKEN_BEDROCK"].strip()
-    url = _build_bedrock_url()
-    payload = _build_request_body(messages, temperature, max_tokens)
-
-    req = urllib.request.Request(url, data=payload, method="POST")
-    req.add_header("Content-Type", "application/json")
-    req.add_header("Accept", "application/json")
-    req.add_header("Authorization", f"Bearer {bearer}")
-
-    ctx = ssl.create_default_context()
-    with urllib.request.urlopen(req, context=ctx, timeout=180) as resp:
-        return _extract_text(json.loads(resp.read()))
-
-
-def _invoke_boto3(messages: List[Dict], temperature: float, max_tokens: int) -> str:
-    """Call Bedrock with boto3 (standard IAM auth)."""
-    payload = _build_request_body(messages, temperature, max_tokens)
+    body = _build_request_body(messages, temperature, max_tokens)
 
     response = _client.invoke_model(
         modelId=config.BEDROCK_MODEL_ID,
         contentType="application/json",
         accept="application/json",
-        body=payload,
+        body=body,
     )
 
     result = json.loads(response["body"].read())
     return _extract_text(result)
-
-
-def _invoke(messages: List[Dict], temperature: float = 0.1, max_tokens: int = 4096) -> str:
-    """Route to the correct invocation method based on auth mode."""
-    if _auth_mode == "api_key":
-        return _invoke_api_key(messages, temperature, max_tokens)
-    elif _auth_mode == "bearer":
-        return _invoke_bearer(messages, temperature, max_tokens)
-    elif _auth_mode == "boto3":
-        return _invoke_boto3(messages, temperature, max_tokens)
-    else:
-        raise RuntimeError("LLM client not initialized — call init_client() first")
 
 
 # ── Response parsing ──────────────────────────────────────────────────
