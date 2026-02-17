@@ -1,8 +1,9 @@
 """AWS Bedrock LLM integration for natural-language to SQL pipeline.
 
-Supports two auth modes:
-  1. Bearer token via AWS_BEARER_TOKEN_BEDROCK env var (direct HTTPS)
-  2. Standard IAM credentials via boto3 (fallback)
+Supports three auth modes (checked in order):
+  1. BEDROCK_API_KEY env var — direct HTTPS with Bearer token (simplest)
+  2. AWS_BEARER_TOKEN_BEDROCK env var — presigned-URL bearer token
+  3. Standard IAM credentials via boto3 (fallback)
 """
 
 from __future__ import annotations
@@ -21,13 +22,22 @@ from schema import SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
 
-_client = None  # boto3 client (used only if no bearer token)
+_client = None  # boto3 client (used only for IAM auth)
 _auth_mode: str = "none"
 
 
 def init_client():
     """Initialize the Bedrock Runtime client."""
     global _client, _auth_mode
+
+    if config.BEDROCK_API_KEY:
+        _auth_mode = "api_key"
+        logger.info(
+            "Bedrock auth: API Key (region=%s, model=%s)",
+            config.AWS_REGION,
+            config.BEDROCK_MODEL_ID,
+        )
+        return
 
     bearer = os.environ.get("AWS_BEARER_TOKEN_BEDROCK", "").strip()
     if bearer:
@@ -39,9 +49,7 @@ def init_client():
         )
         return
 
-    # Fallback to boto3 / IAM credentials
     import boto3
-
     _client = boto3.client("bedrock-runtime", region_name=config.AWS_REGION)
     _auth_mode = "boto3"
     logger.info(
@@ -51,18 +59,46 @@ def init_client():
     )
 
 
-# ── Invocation ────────────────────────────────────────────────────────
+# ── Invocation backends ───────────────────────────────────────────────
+
+def _build_bedrock_url() -> str:
+    """Build the Bedrock Runtime InvokeModel URL."""
+    model_enc = urllib.parse.quote(config.BEDROCK_MODEL_ID, safe="")
+    return (
+        f"https://bedrock-runtime.{config.AWS_REGION}.amazonaws.com"
+        f"/model/{model_enc}/invoke"
+    )
+
+
+def _invoke_api_key(messages: List[Dict], temperature: float, max_tokens: int) -> str:
+    """Call Bedrock Runtime with API Key bearer auth."""
+    url = _build_bedrock_url()
+
+    payload = json.dumps({
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "system": SYSTEM_PROMPT,
+        "messages": messages,
+    }).encode("utf-8")
+
+    req = urllib.request.Request(url, data=payload, method="POST")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Accept", "application/json")
+    req.add_header("Authorization", f"Bearer {config.BEDROCK_API_KEY}")
+
+    ctx = ssl.create_default_context()
+    logger.debug("API-Key invoke: POST %s (%d bytes)", url, len(payload))
+
+    with urllib.request.urlopen(req, context=ctx, timeout=180) as resp:
+        result = json.loads(resp.read())
+        return result["content"][0]["text"]
 
 
 def _invoke_bearer(messages: List[Dict], temperature: float, max_tokens: int) -> str:
-    """Call Bedrock Runtime directly via HTTPS with Bearer Token auth."""
+    """Call Bedrock Runtime with presigned-URL bearer token."""
     bearer = os.environ["AWS_BEARER_TOKEN_BEDROCK"].strip()
-
-    model_id_encoded = urllib.parse.quote(config.BEDROCK_MODEL_ID, safe="")
-    url = (
-        f"https://bedrock-runtime.{config.AWS_REGION}.amazonaws.com"
-        f"/model/{model_id_encoded}/invoke"
-    )
+    url = _build_bedrock_url()
 
     payload = json.dumps({
         "anthropic_version": "bedrock-2023-05-31",
@@ -78,12 +114,8 @@ def _invoke_bearer(messages: List[Dict], temperature: float, max_tokens: int) ->
     req.add_header("Authorization", f"Bearer {bearer}")
 
     ctx = ssl.create_default_context()
-
-    logger.debug("Bearer invoke: POST %s (%d bytes)", url, len(payload))
     with urllib.request.urlopen(req, context=ctx, timeout=180) as resp:
-        body = resp.read()
-        result = json.loads(body)
-        return result["content"][0]["text"]
+        return json.loads(resp.read())["content"][0]["text"]
 
 
 def _invoke_boto3(messages: List[Dict], temperature: float, max_tokens: int) -> str:
@@ -109,7 +141,9 @@ def _invoke_boto3(messages: List[Dict], temperature: float, max_tokens: int) -> 
 
 def _invoke(messages: List[Dict], temperature: float = 0.1, max_tokens: int = 4096) -> str:
     """Route to the correct invocation method based on auth mode."""
-    if _auth_mode == "bearer":
+    if _auth_mode == "api_key":
+        return _invoke_api_key(messages, temperature, max_tokens)
+    elif _auth_mode == "bearer":
         return _invoke_bearer(messages, temperature, max_tokens)
     elif _auth_mode == "boto3":
         return _invoke_boto3(messages, temperature, max_tokens)
@@ -119,19 +153,16 @@ def _invoke(messages: List[Dict], temperature: float = 0.1, max_tokens: int = 40
 
 # ── Response parsing ──────────────────────────────────────────────────
 
-
 def _parse_json_response(text: str) -> dict:
     """Extract JSON from LLM response, handling markdown code blocks."""
     text = text.strip()
 
-    # Try direct parse
     if text.startswith("{"):
         try:
             return json.loads(text)
         except json.JSONDecodeError:
             pass
 
-    # Extract from ```json ... ``` block
     match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL)
     if match:
         try:
@@ -139,7 +170,6 @@ def _parse_json_response(text: str) -> dict:
         except json.JSONDecodeError:
             pass
 
-    # Last resort: find outermost { ... }
     depth = 0
     start = None
     for i, ch in enumerate(text):
@@ -160,22 +190,15 @@ def _parse_json_response(text: str) -> dict:
 
 # ── Public API ────────────────────────────────────────────────────────
 
-
 def generate_sql(conversation_history: List[Dict]) -> dict:
-    """
-    Given conversation history, ask the LLM to interpret the latest question
-    and generate SQL (or a conversational response).
-    """
+    """Interpret the latest question and generate SQL (or conversational response)."""
     raw = _invoke(conversation_history)
     logger.debug("LLM raw (generate_sql): %s", raw[:500])
     return _parse_json_response(raw)
 
 
 def synthesize_answer(conversation_history: List[Dict], query_result: dict, original_sql: str) -> dict:
-    """
-    Given query results, produce a natural-language answer
-    and optional chart configuration.
-    """
+    """Produce a natural-language answer and optional chart configuration."""
     columns = query_result["columns"]
     rows = query_result["rows"]
 
