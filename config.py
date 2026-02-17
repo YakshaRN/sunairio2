@@ -12,7 +12,7 @@ DB_SSLMODE = os.getenv("DB_SSLMODE", "require")
 
 # AWS Bedrock
 AWS_REGION = os.getenv("AWS_REGION", "us-east-2")
-BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "us.anthropic.claude-3-5-sonnet-20241022-v2:0")
+BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "us.amazon.nova-pro-v1:0")
 BEDROCK_API_KEY = os.getenv("BEDROCK_API_KEY", "")
 
 # Query safety
