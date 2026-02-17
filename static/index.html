@@ -1,0 +1,859 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Forecast Query Engine</title>
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <style>
+        :root {
+            --bg-primary: #0f1117;
+            --bg-secondary: #1a1b26;
+            --bg-tertiary: #24253a;
+            --bg-input: #1e1f33;
+            --border: #2d2e45;
+            --text-primary: #e1e2e8;
+            --text-secondary: #9394a5;
+            --text-muted: #6b6c7e;
+            --accent: #6c63ff;
+            --accent-hover: #5a52e0;
+            --accent-glow: rgba(108, 99, 255, 0.15);
+            --success: #4ade80;
+            --warning: #fbbf24;
+            --error: #f87171;
+            --user-bubble: #2a2b40;
+            --ai-bubble: #1a1b26;
+            --sql-bg: #161724;
+            --scrollbar: #3a3b55;
+            --radius: 12px;
+            --radius-sm: 8px;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        /* Scrollbar */
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 3px; }
+
+        /* Header */
+        .header {
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border);
+            padding: 14px 24px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-shrink: 0;
+        }
+        .header-left { display: flex; align-items: center; gap: 12px; }
+        .logo {
+            width: 36px; height: 36px;
+            background: linear-gradient(135deg, var(--accent), #a78bfa);
+            border-radius: 10px;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 18px; font-weight: 700; color: white;
+        }
+        .header h1 { font-size: 18px; font-weight: 600; }
+        .header-subtitle { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+        .header-actions { display: flex; gap: 8px; }
+        .btn-icon {
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border);
+            color: var(--text-secondary);
+            padding: 8px 12px;
+            border-radius: var(--radius-sm);
+            cursor: pointer;
+            font-size: 13px;
+            transition: all 0.2s;
+        }
+        .btn-icon:hover { background: var(--border); color: var(--text-primary); }
+
+        /* Chat Area */
+        .chat-container {
+            flex: 1;
+            overflow-y: auto;
+            padding: 24px;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        .welcome {
+            text-align: center;
+            padding: 60px 20px;
+            max-width: 640px;
+            margin: 0 auto;
+        }
+        .welcome h2 {
+            font-size: 26px;
+            font-weight: 700;
+            margin-bottom: 8px;
+            background: linear-gradient(135deg, var(--accent), #a78bfa);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .welcome p { color: var(--text-secondary); margin-bottom: 24px; line-height: 1.6; }
+        .suggestions {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+        }
+        .suggestion {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 14px 16px;
+            text-align: left;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-size: 13px;
+            color: var(--text-secondary);
+            line-height: 1.5;
+        }
+        .suggestion:hover {
+            border-color: var(--accent);
+            background: var(--accent-glow);
+            color: var(--text-primary);
+        }
+
+        /* Message Bubbles */
+        .message { display: flex; gap: 12px; max-width: 900px; width: 100%; margin: 0 auto; }
+        .message.user { flex-direction: row-reverse; }
+        .message-avatar {
+            width: 32px; height: 32px; border-radius: 50%; flex-shrink: 0;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 14px; font-weight: 600;
+        }
+        .message.user .message-avatar { background: var(--accent); color: white; }
+        .message.assistant .message-avatar {
+            background: linear-gradient(135deg, #6c63ff, #a78bfa);
+            color: white;
+        }
+        .message-body { flex: 1; min-width: 0; }
+        .message.user .message-body { display: flex; justify-content: flex-end; }
+        .message.user .message-content {
+            background: var(--user-bubble);
+            border: 1px solid var(--border);
+            border-radius: var(--radius) 4px var(--radius) var(--radius);
+            padding: 12px 16px;
+            max-width: 75%;
+            font-size: 14px;
+            line-height: 1.6;
+        }
+        .message.assistant .message-content {
+            background: transparent;
+            font-size: 14px;
+            line-height: 1.7;
+        }
+
+        /* Answer sections */
+        .answer-text { margin-bottom: 16px; white-space: pre-wrap; }
+        .answer-text p { margin-bottom: 8px; }
+
+        .section-toggle {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            padding: 6px 12px;
+            cursor: pointer;
+            font-size: 12px;
+            color: var(--text-secondary);
+            transition: all 0.2s;
+            margin-right: 8px;
+            margin-bottom: 8px;
+        }
+        .section-toggle:hover { border-color: var(--accent); color: var(--text-primary); }
+        .section-toggle.active { border-color: var(--accent); color: var(--accent); background: var(--accent-glow); }
+        .section-toggle svg { width: 14px; height: 14px; }
+
+        .sql-block {
+            background: var(--sql-bg);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            padding: 14px 16px;
+            margin: 10px 0;
+            font-family: 'JetBrains Mono', 'Fira Code', monospace;
+            font-size: 12.5px;
+            line-height: 1.6;
+            overflow-x: auto;
+            color: #c4b5fd;
+            white-space: pre-wrap;
+            word-break: break-word;
+            display: none;
+        }
+        .sql-block.visible { display: block; }
+
+        .explanation-block {
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            padding: 12px 16px;
+            margin: 10px 0;
+            font-size: 13px;
+            color: var(--text-secondary);
+            line-height: 1.6;
+            display: none;
+        }
+        .explanation-block.visible { display: block; }
+
+        /* Data table */
+        .data-table-wrapper {
+            margin: 12px 0;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            overflow: hidden;
+            display: none;
+        }
+        .data-table-wrapper.visible { display: block; }
+        .data-table-scroll { max-height: 320px; overflow: auto; }
+        .data-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 12.5px;
+        }
+        .data-table th {
+            background: var(--bg-tertiary);
+            padding: 8px 12px;
+            text-align: left;
+            font-weight: 600;
+            color: var(--text-secondary);
+            border-bottom: 1px solid var(--border);
+            position: sticky; top: 0; z-index: 1;
+            white-space: nowrap;
+        }
+        .data-table td {
+            padding: 6px 12px;
+            border-bottom: 1px solid var(--border);
+            color: var(--text-primary);
+            white-space: nowrap;
+        }
+        .data-table tr:hover td { background: var(--accent-glow); }
+
+        /* Chart */
+        .chart-wrapper {
+            margin: 14px 0;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 8px;
+            min-height: 350px;
+        }
+
+        /* Download bar */
+        .download-bar {
+            display: flex;
+            gap: 8px;
+            margin-top: 10px;
+        }
+        .btn-download {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            padding: 5px 10px;
+            font-size: 11px;
+            color: var(--text-secondary);
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .btn-download:hover { border-color: var(--accent); color: var(--text-primary); }
+
+        /* Typing indicator */
+        .typing { display: flex; gap: 4px; padding: 8px 0; }
+        .typing span {
+            width: 8px; height: 8px;
+            background: var(--text-muted);
+            border-radius: 50%;
+            animation: bounce 1.4s infinite;
+        }
+        .typing span:nth-child(2) { animation-delay: 0.2s; }
+        .typing span:nth-child(3) { animation-delay: 0.4s; }
+        @keyframes bounce {
+            0%, 60%, 100% { transform: translateY(0); }
+            30% { transform: translateY(-8px); }
+        }
+
+        /* Input Area */
+        .input-area {
+            padding: 16px 24px 20px;
+            background: var(--bg-secondary);
+            border-top: 1px solid var(--border);
+            flex-shrink: 0;
+        }
+        .input-row {
+            display: flex;
+            gap: 10px;
+            max-width: 900px;
+            margin: 0 auto;
+        }
+        .input-wrapper {
+            flex: 1;
+            position: relative;
+        }
+        #question-input {
+            width: 100%;
+            background: var(--bg-input);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 14px 18px;
+            padding-right: 50px;
+            color: var(--text-primary);
+            font-size: 14px;
+            outline: none;
+            transition: border-color 0.2s;
+            font-family: inherit;
+            resize: none;
+            min-height: 48px;
+            max-height: 120px;
+            line-height: 1.4;
+        }
+        #question-input::placeholder { color: var(--text-muted); }
+        #question-input:focus { border-color: var(--accent); }
+        .btn-send {
+            position: absolute;
+            right: 8px;
+            bottom: 8px;
+            background: var(--accent);
+            border: none;
+            border-radius: 8px;
+            width: 34px;
+            height: 34px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .btn-send:hover { background: var(--accent-hover); }
+        .btn-send:disabled { opacity: 0.4; cursor: not-allowed; }
+        .btn-send svg { width: 18px; height: 18px; fill: white; }
+
+        .input-hint {
+            text-align: center;
+            font-size: 11px;
+            color: var(--text-muted);
+            margin-top: 8px;
+        }
+
+        /* Status bar */
+        .status-bar {
+            padding: 4px 24px;
+            background: var(--bg-secondary);
+            border-top: 1px solid var(--border);
+            font-size: 11px;
+            color: var(--text-muted);
+            display: flex;
+            justify-content: space-between;
+            flex-shrink: 0;
+        }
+        .status-dot {
+            display: inline-block;
+            width: 6px; height: 6px;
+            border-radius: 50%;
+            margin-right: 6px;
+        }
+        .status-dot.connected { background: var(--success); }
+        .status-dot.disconnected { background: var(--error); }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .suggestions { grid-template-columns: 1fr; }
+            .chat-container { padding: 16px; }
+            .input-area { padding: 12px 16px 16px; }
+        }
+    </style>
+</head>
+<body>
+    <!-- Header -->
+    <div class="header">
+        <div class="header-left">
+            <div class="logo">F</div>
+            <div>
+                <h1>Forecast Query Engine</h1>
+                <div class="header-subtitle">ERCOT & PJM Weather + Energy Forecasts</div>
+            </div>
+        </div>
+        <div class="header-actions">
+            <button class="btn-icon" onclick="clearSession()" title="New conversation">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+                New Chat
+            </button>
+        </div>
+    </div>
+
+    <!-- Chat -->
+    <div class="chat-container" id="chat-container">
+        <div class="welcome" id="welcome">
+            <h2>Energy & Weather Forecasting Assistant</h2>
+            <p>
+                Ask questions about weather forecasts, energy demand, renewable generation,
+                and more across ERCOT (Texas) and PJM (Mid-Atlantic) regions.
+                Powered by probabilistic ensemble forecasts with 1,000 scenarios.
+            </p>
+            <div class="suggestions">
+                <div class="suggestion" onclick="askSuggestion(this)">
+                    What is the average forecasted temperature in Houston for the next 7 days?
+                </div>
+                <div class="suggestion" onclick="askSuggestion(this)">
+                    Compare wind energy generation forecast vs. load for ERCOT west zone this week
+                </div>
+                <div class="suggestion" onclick="askSuggestion(this)">
+                    What's the probability that temperature exceeds 35°C in any ERCOT zone next week?
+                </div>
+                <div class="suggestion" onclick="askSuggestion(this)">
+                    Show the P10, P50, and P90 solar generation forecast for PJM over the next 5 days
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Input -->
+    <div class="input-area">
+        <div class="input-row">
+            <div class="input-wrapper">
+                <textarea
+                    id="question-input"
+                    placeholder="Ask about weather forecasts, energy demand, renewable generation..."
+                    rows="1"
+                    onkeydown="handleKeyDown(event)"
+                    oninput="autoResize(this)"
+                ></textarea>
+                <button class="btn-send" id="btn-send" onclick="submitQuestion()">
+                    <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+                </button>
+            </div>
+        </div>
+        <div class="input-hint">Press Enter to send, Shift+Enter for new line</div>
+    </div>
+
+    <!-- Status -->
+    <div class="status-bar">
+        <span><span class="status-dot connected" id="status-dot"></span><span id="status-text">Connected to Aurora PostgreSQL</span></span>
+        <span id="session-info">Session: default</span>
+    </div>
+
+<script>
+// ─── State ───────────────────────────────────────────────────────────
+const sessionId = 'session_' + Date.now().toString(36);
+let isLoading = false;
+let messageCount = 0;
+
+document.getElementById('session-info').textContent = `Session: ${sessionId.slice(0, 16)}`;
+
+// ─── Helpers ─────────────────────────────────────────────────────────
+function autoResize(el) {
+    el.style.height = 'auto';
+    el.style.height = Math.min(el.scrollHeight, 120) + 'px';
+}
+
+function handleKeyDown(e) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        submitQuestion();
+    }
+}
+
+function askSuggestion(el) {
+    document.getElementById('question-input').value = el.textContent.trim();
+    submitQuestion();
+}
+
+function scrollToBottom() {
+    const container = document.getElementById('chat-container');
+    setTimeout(() => container.scrollTop = container.scrollHeight, 50);
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+// ─── Clear session ───────────────────────────────────────────────────
+async function clearSession() {
+    await fetch('/api/clear?session_id=' + sessionId, { method: 'POST' });
+    const container = document.getElementById('chat-container');
+    container.innerHTML = '';
+    const welcome = document.createElement('div');
+    welcome.className = 'welcome';
+    welcome.id = 'welcome';
+    welcome.innerHTML = `
+        <h2>Energy & Weather Forecasting Assistant</h2>
+        <p>Ask questions about weather forecasts, energy demand, renewable generation,
+        and more across ERCOT (Texas) and PJM (Mid-Atlantic) regions.</p>
+        <div class="suggestions">
+            <div class="suggestion" onclick="askSuggestion(this)">What is the average forecasted temperature in Houston for the next 7 days?</div>
+            <div class="suggestion" onclick="askSuggestion(this)">Compare wind energy generation forecast vs. load for ERCOT west zone this week</div>
+            <div class="suggestion" onclick="askSuggestion(this)">What's the probability that temperature exceeds 35°C in any ERCOT zone next week?</div>
+            <div class="suggestion" onclick="askSuggestion(this)">Show the P10, P50, and P90 solar generation forecast for PJM over the next 5 days</div>
+        </div>`;
+    container.appendChild(welcome);
+    messageCount = 0;
+}
+
+// ─── Render user message ─────────────────────────────────────────────
+function addUserMessage(text) {
+    const welcome = document.getElementById('welcome');
+    if (welcome) welcome.remove();
+
+    const container = document.getElementById('chat-container');
+    const msg = document.createElement('div');
+    msg.className = 'message user';
+    msg.innerHTML = `
+        <div class="message-avatar">U</div>
+        <div class="message-body">
+            <div class="message-content">${escapeHtml(text)}</div>
+        </div>`;
+    container.appendChild(msg);
+    scrollToBottom();
+}
+
+// ─── Render loading ──────────────────────────────────────────────────
+function addLoadingMessage() {
+    const container = document.getElementById('chat-container');
+    const msg = document.createElement('div');
+    msg.className = 'message assistant';
+    msg.id = 'loading-msg';
+    msg.innerHTML = `
+        <div class="message-avatar">F</div>
+        <div class="message-body">
+            <div class="message-content">
+                <div class="typing"><span></span><span></span><span></span></div>
+            </div>
+        </div>`;
+    container.appendChild(msg);
+    scrollToBottom();
+}
+
+function removeLoadingMessage() {
+    const el = document.getElementById('loading-msg');
+    if (el) el.remove();
+}
+
+// ─── Toggle sections ─────────────────────────────────────────────────
+function toggleSection(btn, targetId) {
+    const target = document.getElementById(targetId);
+    if (!target) return;
+    const isVisible = target.classList.contains('visible');
+    target.classList.toggle('visible');
+    btn.classList.toggle('active');
+}
+
+// ─── Render assistant message ────────────────────────────────────────
+function addAssistantMessage(response) {
+    const container = document.getElementById('chat-container');
+    const msgId = ++messageCount;
+    const msg = document.createElement('div');
+    msg.className = 'message assistant';
+
+    let html = `<div class="message-avatar">F</div><div class="message-body"><div class="message-content">`;
+
+    // Main answer
+    html += `<div class="answer-text">${formatAnswer(response.answer)}</div>`;
+
+    // Toggle buttons row
+    let toggles = '';
+    if (response.sql) {
+        toggles += `<button class="section-toggle" onclick="toggleSection(this, 'sql-${msgId}')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 18l6-6-6-6M8 6l-6 6 6 6"/></svg>
+            SQL Query
+        </button>`;
+    }
+    if (response.explanation) {
+        toggles += `<button class="section-toggle" onclick="toggleSection(this, 'expl-${msgId}')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
+            Explanation
+        </button>`;
+    }
+    if (response.data && response.data.rows && response.data.rows.length > 0) {
+        toggles += `<button class="section-toggle" onclick="toggleSection(this, 'table-${msgId}')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M3 15h18M9 3v18"/></svg>
+            Data Table (${response.data.row_count} rows)
+        </button>`;
+    }
+    if (toggles) html += `<div style="margin-bottom:8px">${toggles}</div>`;
+
+    // SQL block
+    if (response.sql) {
+        html += `<div class="sql-block" id="sql-${msgId}">${escapeHtml(response.sql)}</div>`;
+    }
+
+    // Explanation block
+    if (response.explanation) {
+        html += `<div class="explanation-block" id="expl-${msgId}">${escapeHtml(response.explanation)}</div>`;
+    }
+
+    // Data table
+    if (response.data && response.data.rows && response.data.rows.length > 0) {
+        html += renderDataTable(response.data, msgId);
+    }
+
+    // Chart
+    if (response.chart && response.data) {
+        html += `<div class="chart-wrapper"><div id="chart-${msgId}"></div></div>`;
+    }
+
+    // Download buttons
+    if (response.data && response.data.rows && response.data.rows.length > 0) {
+        html += `<div class="download-bar">`;
+        html += `<button class="btn-download" onclick="downloadCSV(${msgId})">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+            CSV
+        </button>`;
+        if (response.chart) {
+            html += `<button class="btn-download" onclick="downloadChart(${msgId})">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+                PNG Chart
+            </button>`;
+        }
+        html += `</div>`;
+    }
+
+    // Error
+    if (response.error) {
+        html += `<div style="margin-top:10px;padding:10px 14px;background:rgba(248,113,113,0.1);border:1px solid rgba(248,113,113,0.3);border-radius:8px;font-size:12px;color:var(--error)">Error: ${escapeHtml(response.error)}</div>`;
+    }
+
+    html += `</div></div></div>`;
+    msg.innerHTML = html;
+    container.appendChild(msg);
+
+    // Store data for download
+    if (response.data) {
+        msg.dataset.columns = JSON.stringify(response.data.columns);
+        msg.dataset.rows = JSON.stringify(response.data.rows);
+        msg.dataset.msgId = msgId;
+    }
+
+    // Render chart
+    if (response.chart && response.data) {
+        setTimeout(() => renderChart(response.chart, response.data, msgId), 100);
+    }
+
+    scrollToBottom();
+}
+
+// ─── Format answer text ──────────────────────────────────────────────
+function formatAnswer(text) {
+    if (!text) return '';
+    // Simple markdown-ish: **bold**, line breaks
+    let html = escapeHtml(text);
+    html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+    html = html.replace(/\n/g, '<br>');
+    return html;
+}
+
+// ─── Render data table ───────────────────────────────────────────────
+function renderDataTable(data, msgId) {
+    const maxRows = 100;
+    let html = `<div class="data-table-wrapper" id="table-${msgId}"><div class="data-table-scroll"><table class="data-table"><thead><tr>`;
+    data.columns.forEach(col => { html += `<th>${escapeHtml(col)}</th>`; });
+    html += `</tr></thead><tbody>`;
+    const rows = data.rows.slice(0, maxRows);
+    rows.forEach(row => {
+        html += '<tr>';
+        row.forEach(val => {
+            let display = val === null ? '<span style="color:var(--text-muted)">null</span>' : escapeHtml(String(val));
+            html += `<td>${display}</td>`;
+        });
+        html += '</tr>';
+    });
+    html += `</tbody></table></div>`;
+    if (data.rows.length > maxRows) {
+        html += `<div style="padding:8px 12px;font-size:11px;color:var(--text-muted);border-top:1px solid var(--border)">Showing ${maxRows} of ${data.row_count} rows</div>`;
+    }
+    html += `</div>`;
+    return html;
+}
+
+// ─── Render chart ────────────────────────────────────────────────────
+function renderChart(chartConfig, data, msgId) {
+    const el = document.getElementById(`chart-${msgId}`);
+    if (!el || !data.rows.length) return;
+
+    const cols = data.columns;
+    const rows = data.rows;
+
+    const xIdx = cols.indexOf(chartConfig.x_column);
+    const xData = xIdx >= 0 ? rows.map(r => r[xIdx]) : rows.map((_, i) => i);
+
+    const traces = [];
+    const yColumns = chartConfig.y_columns || [cols[cols.length - 1]];
+    const yLabels = chartConfig.y_labels || yColumns;
+
+    const colors = ['#6c63ff', '#a78bfa', '#4ade80', '#fbbf24', '#f87171', '#38bdf8', '#fb923c'];
+
+    yColumns.forEach((yCol, i) => {
+        const yIdx = cols.indexOf(yCol);
+        if (yIdx < 0) return;
+        const yData = rows.map(r => r[yIdx]);
+
+        const trace = {
+            x: xData,
+            y: yData,
+            name: yLabels[i] || yCol,
+            marker: { color: colors[i % colors.length] },
+        };
+
+        switch (chartConfig.type) {
+            case 'bar':
+                trace.type = 'bar';
+                break;
+            case 'scatter':
+                trace.type = 'scatter';
+                trace.mode = 'markers';
+                break;
+            case 'area':
+                trace.type = 'scatter';
+                trace.fill = 'tozeroy';
+                trace.mode = 'lines';
+                break;
+            default:
+                trace.type = 'scatter';
+                trace.mode = 'lines+markers';
+                trace.marker.size = 4;
+        }
+        traces.push(trace);
+    });
+
+    const layout = {
+        title: { text: chartConfig.title || '', font: { color: '#e1e2e8', size: 14 } },
+        xaxis: {
+            title: chartConfig.x_label || '',
+            gridcolor: '#2d2e45',
+            color: '#9394a5',
+            tickfont: { size: 11 },
+        },
+        yaxis: {
+            title: chartConfig.y_label || '',
+            gridcolor: '#2d2e45',
+            color: '#9394a5',
+            tickfont: { size: 11 },
+        },
+        paper_bgcolor: 'transparent',
+        plot_bgcolor: 'transparent',
+        font: { color: '#e1e2e8' },
+        margin: { l: 60, r: 30, t: 40, b: 50 },
+        legend: { font: { color: '#9394a5' } },
+        showlegend: yColumns.length > 1,
+    };
+
+    Plotly.newPlot(el, traces, layout, {
+        responsive: true,
+        displayModeBar: true,
+        modeBarButtonsToRemove: ['lasso2d', 'select2d'],
+        displaylogo: false,
+    });
+}
+
+// ─── Downloads ───────────────────────────────────────────────────────
+function downloadCSV(msgId) {
+    const msgEl = document.querySelector(`[data-msg-id="${msgId}"]`) ||
+                  document.querySelectorAll('.message.assistant')[msgId - 1];
+    if (!msgEl) return;
+
+    const columns = JSON.parse(msgEl.dataset.columns);
+    const rows = JSON.parse(msgEl.dataset.rows);
+
+    let csv = columns.join(',') + '\n';
+    rows.forEach(row => {
+        csv += row.map(v => {
+            if (v === null) return '';
+            const s = String(v);
+            return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g, '""')}"` : s;
+        }).join(',') + '\n';
+    });
+
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `forecast_data_${new Date().toISOString().slice(0,19).replace(/[:-]/g,'')}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+}
+
+function downloadChart(msgId) {
+    const el = document.getElementById(`chart-${msgId}`);
+    if (!el) return;
+    Plotly.downloadImage(el, { format: 'png', width: 1200, height: 600, filename: `forecast_chart_${msgId}` });
+}
+
+// ─── Submit ──────────────────────────────────────────────────────────
+async function submitQuestion() {
+    const input = document.getElementById('question-input');
+    const question = input.value.trim();
+    if (!question || isLoading) return;
+
+    isLoading = true;
+    input.value = '';
+    autoResize(input);
+    document.getElementById('btn-send').disabled = true;
+
+    addUserMessage(question);
+    addLoadingMessage();
+
+    try {
+        const res = await fetch('/api/query', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ question, session_id: sessionId }),
+        });
+        const data = await res.json();
+        removeLoadingMessage();
+        addAssistantMessage(data);
+    } catch (err) {
+        removeLoadingMessage();
+        addAssistantMessage({
+            answer: 'Failed to connect to the server. Please check that the backend is running.',
+            error: err.message,
+        });
+    } finally {
+        isLoading = false;
+        document.getElementById('btn-send').disabled = false;
+        document.getElementById('question-input').focus();
+    }
+}
+
+// ─── Health check on load ────────────────────────────────────────────
+async function checkHealth() {
+    try {
+        const res = await fetch('/api/health');
+        const data = await res.json();
+        const dot = document.getElementById('status-dot');
+        const txt = document.getElementById('status-text');
+        if (data.status === 'healthy') {
+            dot.className = 'status-dot connected';
+            txt.textContent = 'Connected to Aurora PostgreSQL';
+        } else {
+            dot.className = 'status-dot disconnected';
+            txt.textContent = 'Database connection issue';
+        }
+    } catch {
+        document.getElementById('status-dot').className = 'status-dot disconnected';
+        document.getElementById('status-text').textContent = 'Server unreachable';
+    }
+}
+
+checkHealth();
+setInterval(checkHealth, 60000);
+document.getElementById('question-input').focus();
+</script>
+</body>
+</html>
