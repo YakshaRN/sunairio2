@@ -325,11 +325,10 @@
         }
         #question-input::placeholder { color: var(--text-muted); }
         #question-input:focus { border-color: var(--accent); }
-        .btn-send {
+        .btn-send, .btn-stop {
             position: absolute;
             right: 8px;
             bottom: 8px;
-            background: var(--accent);
             border: none;
             border-radius: 8px;
             width: 34px;
@@ -338,11 +337,17 @@
             align-items: center;
             justify-content: center;
             cursor: pointer;
-            transition: background 0.2s;
+            transition: all 0.2s;
         }
+        .btn-send { background: var(--accent); }
         .btn-send:hover { background: var(--accent-hover); }
         .btn-send:disabled { opacity: 0.4; cursor: not-allowed; }
         .btn-send svg { width: 18px; height: 18px; fill: white; }
+        .btn-stop { background: var(--error); display: none; }
+        .btn-stop:hover { background: #ef4444; }
+        .btn-stop svg { width: 16px; height: 16px; fill: white; }
+        .btn-stop.visible { display: flex; }
+        .btn-send.hidden { display: none; }
 
         .input-hint {
             text-align: center;
@@ -437,6 +442,9 @@
                 <button class="btn-send" id="btn-send" onclick="submitQuestion()">
                     <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
                 </button>
+                <button class="btn-stop" id="btn-stop" onclick="stopRequest()" title="Stop request">
+                    <svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1" fill="white"/></svg>
+                </button>
             </div>
         </div>
         <div class="input-hint">Press Enter to send, Shift+Enter for new line</div>
@@ -453,6 +461,8 @@
 const sessionId = 'session_' + Date.now().toString(36);
 let isLoading = false;
 let messageCount = 0;
+let currentRequestId = null;
+let currentAbortController = null;
 
 document.getElementById('session-info').textContent = `Session: ${sessionId.slice(0, 16)}`;
 
@@ -795,7 +805,69 @@ function downloadChart(msgId) {
     Plotly.downloadImage(el, { format: 'png', width: 1200, height: 600, filename: `forecast_chart_${msgId}` });
 }
 
-// ─── Submit ──────────────────────────────────────────────────────────
+// ─── Show/hide stop button ───────────────────────────────────────────
+function showStopButton() {
+    document.getElementById('btn-send').classList.add('hidden');
+    document.getElementById('btn-stop').classList.add('visible');
+}
+function hideStopButton() {
+    document.getElementById('btn-stop').classList.remove('visible');
+    document.getElementById('btn-send').classList.remove('hidden');
+}
+
+// ─── Stop request ────────────────────────────────────────────────────
+async function stopRequest() {
+    if (!isLoading || !currentRequestId) return;
+    if (currentAbortController) currentAbortController.abort();
+    try {
+        await fetch('/api/cancel', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ request_id: currentRequestId }),
+        });
+    } catch (e) { /* ignore */ }
+    removeLoadingMessage();
+    addAssistantMessage({ answer: 'Request stopped.' });
+    isLoading = false;
+    currentRequestId = null;
+    currentAbortController = null;
+    hideStopButton();
+    document.getElementById('btn-send').disabled = false;
+    document.getElementById('question-input').focus();
+}
+
+// ─── Show/hide stop button ───────────────────────────────────────────────
+function showStopButton() {
+    document.getElementById('btn-send').classList.add('hidden');
+    document.getElementById('btn-stop').classList.add('visible');
+}
+function hideStopButton() {
+    document.getElementById('btn-stop').classList.remove('visible');
+    document.getElementById('btn-send').classList.remove('hidden');
+}
+
+// ─── Stop request ──────────────────────────────────────────────────────
+async function stopRequest() {
+    if (!isLoading || !currentRequestId) return;
+    if (currentAbortController) currentAbortController.abort();
+    try {
+        await fetch('/api/cancel', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ request_id: currentRequestId }),
+        });
+    } catch (e) { /* ignore */ }
+    removeLoadingMessage();
+    addAssistantMessage({ answer: 'Request stopped.' });
+    isLoading = false;
+    currentRequestId = null;
+    currentAbortController = null;
+    hideStopButton();
+    document.getElementById('btn-send').disabled = false;
+    document.getElementById('question-input').focus();
+}
+
+// ─── Submit ──────────────────────────────────────────────────────────────
 async function submitQuestion() {
     const input = document.getElementById('question-input');
     const question = input.value.trim();
@@ -805,6 +877,10 @@ async function submitQuestion() {
     input.value = '';
     autoResize(input);
     document.getElementById('btn-send').disabled = true;
+    showStopButton();
+
+    currentRequestId = 'req_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2,6);
+    currentAbortController = new AbortController();
 
     addUserMessage(question);
     addLoadingMessage();
@@ -813,12 +889,14 @@ async function submitQuestion() {
         const res = await fetch('/api/query', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ question, session_id: sessionId }),
+            body: JSON.stringify({ question, session_id: sessionId, request_id: currentRequestId }),
+            signal: currentAbortController.signal,
         });
         const data = await res.json();
         removeLoadingMessage();
         addAssistantMessage(data);
     } catch (err) {
+        if (err.name === 'AbortError') return;
         removeLoadingMessage();
         addAssistantMessage({
             answer: 'Failed to connect to the server. Please check that the backend is running.',
@@ -826,6 +904,9 @@ async function submitQuestion() {
         });
     } finally {
         isLoading = false;
+        currentRequestId = null;
+        currentAbortController = null;
+        hideStopButton();
         document.getElementById('btn-send').disabled = false;
         document.getElementById('question-input').focus();
     }
@@ -854,6 +935,10 @@ async function checkHealth() {
 checkHealth();
 setInterval(checkHealth, 60000);
 document.getElementById('question-input').focus();
+</script>
+</body>
+</html>
+us();
 </script>
 </body>
 </html>

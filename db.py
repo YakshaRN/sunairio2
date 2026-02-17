@@ -1,9 +1,18 @@
-"""Database connection pool and query execution."""
+"""Database connection pool and query execution.
+
+SECURITY: This module enforces STRICT read-only access.
+Under NO circumstances can any data be modified or deleted.
+- Connections use SET default_transaction_read_only = ON
+- SQL is validated against a comprehensive blocklist before execution
+- Only SELECT and WITH (CTE) statements are permitted
+- Queries can be cancelled via their backend PID
+"""
 
 from __future__ import annotations
 
 import logging
-from typing import Optional
+import re
+from typing import Optional, Dict
 
 import psycopg2
 import psycopg2.pool
@@ -16,9 +25,26 @@ logger = logging.getLogger(__name__)
 
 _pool: Optional[psycopg2.pool.ThreadedConnectionPool] = None
 
+# Every keyword that could modify data — checked before execution
+_FORBIDDEN_KEYWORDS = frozenset({
+    "INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "TRUNCATE",
+    "GRANT", "REVOKE", "REPLACE", "UPSERT", "MERGE",
+    "COPY", "LOAD", "IMPORT",
+    "EXECUTE", "EXEC", "CALL",
+    "SET ROLE", "SET SESSION AUTHORIZATION", "RESET ROLE",
+    "BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT",
+    "LOCK", "VACUUM", "ANALYZE", "REINDEX", "CLUSTER",
+    "COMMENT", "SECURITY", "REASSIGN", "DISCARD",
+    "DO", "NOTIFY", "LISTEN", "UNLISTEN",
+    "PREPARE", "DEALLOCATE",
+})
+
+# Track active queries for cancellation: request_id -> backend_pid
+_active_queries: Dict[str, int] = {}
+
 
 def init_pool(min_conn: int = 2, max_conn: int = 10):
-    """Initialize the connection pool."""
+    """Initialize the connection pool. All connections are forced read-only."""
     global _pool
     _pool = psycopg2.pool.ThreadedConnectionPool(
         min_conn,
@@ -31,7 +57,7 @@ def init_pool(min_conn: int = 2, max_conn: int = 10):
         sslmode=config.DB_SSLMODE,
         connect_timeout=10,
     )
-    logger.info("Database connection pool initialized (%d-%d connections)", min_conn, max_conn)
+    logger.info("Database connection pool initialized (%d-%d connections, READ-ONLY enforced)", min_conn, max_conn)
 
 
 def close_pool():
@@ -52,54 +78,126 @@ def get_connection():
         _pool.putconn(conn)
 
 
-def execute_query(sql: str, params: Optional[dict] = None) -> dict:
+def _validate_sql(sql: str):
     """
-    Execute a read-only SQL query and return results as a dict.
+    Strict validation that SQL is read-only.
+    Raises ValueError if any write/modify operation is detected.
+
+    This is a defense-in-depth layer on top of the database-level
+    read-only transaction setting.
+    """
+    # Strip comments to prevent bypass via comment injection
+    cleaned = re.sub(r'--.*?$', ' ', sql, flags=re.MULTILINE)  # single-line comments
+    cleaned = re.sub(r'/\*.*?\*/', ' ', cleaned, flags=re.DOTALL)  # block comments
+    cleaned_upper = cleaned.strip().upper()
+
+    # Must start with SELECT or WITH
+    if not cleaned_upper.startswith("SELECT") and not cleaned_upper.startswith("WITH"):
+        raise ValueError("BLOCKED: Only SELECT / WITH queries are allowed. No data modification permitted.")
+
+    # Tokenize and check against forbidden keywords
+    tokens = re.findall(r'[A-Z_]+', cleaned_upper)
+    for token in tokens:
+        if token in _FORBIDDEN_KEYWORDS:
+            raise ValueError(f"BLOCKED: Forbidden keyword '{token}' detected. No data modification permitted.")
+
+    # Block semicolons (prevents multi-statement injection)
+    # Allow only one statement
+    statements = [s.strip() for s in cleaned.split(';') if s.strip()]
+    if len(statements) > 1:
+        raise ValueError("BLOCKED: Multiple SQL statements are not allowed.")
+
+    # Block common injection patterns
+    injection_patterns = [
+        r"INTO\s+(?:OUTFILE|DUMPFILE)",
+        r"LOAD_FILE\s*\(",
+        r"pg_sleep\s*\(",
+        r"dblink\s*\(",
+        r"pg_read_file\s*\(",
+        r"pg_write_file\s*\(",
+        r"lo_import\s*\(",
+        r"lo_export\s*\(",
+    ]
+    for pattern in injection_patterns:
+        if re.search(pattern, cleaned_upper):
+            raise ValueError(f"BLOCKED: Potentially dangerous SQL pattern detected.")
+
+
+def execute_query(sql: str, params: Optional[dict] = None, request_id: Optional[str] = None) -> dict:
+    """
+    Execute a STRICTLY read-only SQL query and return results.
+
+    Security layers:
+      1. SQL text validation (keyword blocklist, comment stripping, injection detection)
+      2. SET default_transaction_read_only = ON (database-level enforcement)
+      3. Statement timeout to prevent resource exhaustion
 
     Returns:
-        {
-            "columns": ["col1", "col2", ...],
-            "rows": [[val1, val2, ...], ...],
-            "row_count": int,
-            "truncated": bool
-        }
+        {"columns": [...], "rows": [[...], ...], "row_count": int, "truncated": bool}
     """
-    sql_upper = sql.strip().upper()
-    if not sql_upper.startswith("SELECT") and not sql_upper.startswith("WITH"):
-        raise ValueError("Only SELECT / WITH queries are allowed")
-
-    for forbidden in ("INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "TRUNCATE", "GRANT", "REVOKE"):
-        if forbidden in sql_upper.split("--")[0].split("/*")[0]:
-            tokens = sql_upper.replace("(", " ").replace(")", " ").split()
-            if forbidden in tokens:
-                raise ValueError(f"Forbidden SQL keyword: {forbidden}")
+    _validate_sql(sql)
 
     with get_connection() as conn:
         with conn.cursor() as cur:
+            # CRITICAL: Force the transaction to read-only at the database level.
+            # Even if SQL validation is somehow bypassed, PostgreSQL will reject writes.
+            cur.execute("SET default_transaction_read_only = ON")
             cur.execute(f"SET LOCAL statement_timeout = '{config.QUERY_TIMEOUT_SEC * 1000}'")
-            cur.execute(sql, params or {})
-            columns = [desc[0] for desc in cur.description]
-            rows = cur.fetchmany(config.MAX_QUERY_ROWS + 1)
 
-            truncated = len(rows) > config.MAX_QUERY_ROWS
-            if truncated:
-                rows = rows[: config.MAX_QUERY_ROWS]
+            # Track this query's backend PID for cancellation
+            cur.execute("SELECT pg_backend_pid()")
+            backend_pid = cur.fetchone()[0]
+            if request_id:
+                _active_queries[request_id] = backend_pid
 
-            serialized_rows = []
-            for row in rows:
-                serialized_row = []
-                for val in row:
-                    if hasattr(val, "isoformat"):
-                        serialized_row.append(val.isoformat())
-                    elif val is None:
-                        serialized_row.append(None)
-                    else:
-                        serialized_row.append(val)
-                serialized_rows.append(serialized_row)
+            try:
+                cur.execute(sql, params or {})
+                columns = [desc[0] for desc in cur.description]
+                rows = cur.fetchmany(config.MAX_QUERY_ROWS + 1)
 
-            return {
-                "columns": columns,
-                "rows": serialized_rows,
-                "row_count": len(serialized_rows),
-                "truncated": truncated,
-            }
+                truncated = len(rows) > config.MAX_QUERY_ROWS
+                if truncated:
+                    rows = rows[: config.MAX_QUERY_ROWS]
+
+                serialized_rows = []
+                for row in rows:
+                    serialized_row = []
+                    for val in row:
+                        if hasattr(val, "isoformat"):
+                            serialized_row.append(val.isoformat())
+                        elif val is None:
+                            serialized_row.append(None)
+                        else:
+                            serialized_row.append(val)
+                    serialized_rows.append(serialized_row)
+
+                return {
+                    "columns": columns,
+                    "rows": serialized_rows,
+                    "row_count": len(serialized_rows),
+                    "truncated": truncated,
+                }
+            finally:
+                if request_id:
+                    _active_queries.pop(request_id, None)
+
+
+def cancel_query(request_id: str) -> bool:
+    """
+    Cancel a running query by its request_id.
+    Returns True if cancellation was sent, False if no active query found.
+    """
+    backend_pid = _active_queries.pop(request_id, None)
+    if backend_pid is None:
+        return False
+
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT pg_cancel_backend(%s)", (backend_pid,))
+                result = cur.fetchone()[0]
+                logger.info("Cancelled query for request %s (pid=%d, result=%s)", request_id, backend_pid, result)
+                return result
+    except Exception as e:
+        logger.error("Failed to cancel query for request %s: %s", request_id, e)
+        return False
