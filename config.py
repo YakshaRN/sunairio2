@@ -12,7 +12,7 @@ DB_SSLMODE = os.getenv("DB_SSLMODE", "require")
 
 # AWS Bedrock
 AWS_REGION = os.getenv("AWS_REGION", "us-east-2")
-BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "us.amazon.nova-pro-v1:0")
+BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "us.anthropic.claude-3-7-sonnet-20250219-v1:0")
 
 # Query safety
 MAX_QUERY_ROWS = int(os.getenv("MAX_QUERY_ROWS", "5000"))
