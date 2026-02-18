@@ -25,11 +25,16 @@ logger = logging.getLogger(__name__)
 
 _pool: Optional[psycopg2.pool.ThreadedConnectionPool] = None
 
-# Every keyword that could modify data — checked before execution
+# Every keyword that could modify data — checked before execution.
+# NOTE: "LOAD" and "IMPORT" are intentionally excluded from this list.
+# They are NOT data-modification commands and are common column/alias names
+# in the energy domain (e.g., electrical load in MW). They are also already
+# covered by the SELECT/WITH start requirement — the SQL LOAD command can
+# only appear as a top-level statement, which that check blocks.
 _FORBIDDEN_KEYWORDS = frozenset({
     "INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "TRUNCATE",
     "GRANT", "REVOKE", "REPLACE", "UPSERT", "MERGE",
-    "COPY", "LOAD", "IMPORT",
+    "COPY",
     "EXECUTE", "EXEC", "CALL",
     "SET ROLE", "SET SESSION AUTHORIZATION", "RESET ROLE",
     "BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT",
