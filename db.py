@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import re
+from decimal import Decimal
 from typing import Optional, Dict
 
 import psycopg2
@@ -224,10 +225,12 @@ def execute_query(sql: str, params: Optional[dict] = None, request_id: Optional[
                 for row in rows:
                     serialized_row = []
                     for val in row:
-                        if hasattr(val, "isoformat"):
-                            serialized_row.append(val.isoformat())
-                        elif val is None:
+                        if val is None:
                             serialized_row.append(None)
+                        elif hasattr(val, "isoformat"):
+                            serialized_row.append(val.isoformat())
+                        elif isinstance(val, Decimal):
+                            serialized_row.append(float(val))
                         else:
                             serialized_row.append(val)
                     serialized_rows.append(serialized_row)

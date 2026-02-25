@@ -11,9 +11,9 @@ SCHEMA_CONTEXT = """
 
 You have access to 4 tables. All timestamps are in UTC (timestamptz).
 
-### 1. weather_forecast_ensemble
-Short-range weather forecast ensembles (hourly resolution, ~7-14 day horizon).
-Each row is one ensemble member's forecast value for a given location/variable/hour.
+### 1. weather_forecast_ensemble  ← FRESHEST weather data (~10-day horizon)
+Short-range weather forecast ensembles (hourly resolution, ~234 hours / 10 days).
+Updated frequently — always has the most recent initialization of any weather table.
 
 ```sql
 CREATE TABLE weather_forecast_ensemble (
@@ -32,9 +32,9 @@ CREATE TABLE weather_forecast_ensemble (
 
 **Data range:** initialization from 2025-09 to present; valid_datetime up to ~2 weeks ahead
 
-### 2. weather_seasonal_ensemble
-Longer-range seasonal weather ensembles (months ahead).
-Same structure as weather_forecast_ensemble but with a seasonal horizon.
+### 2. weather_seasonal_ensemble  ← SEASONAL weather data (months ahead)
+Longer-range seasonal weather ensembles. Older initialization than
+weather_forecast_ensemble, but covers months into the future.
 
 ```sql
 CREATE TABLE weather_seasonal_ensemble (
@@ -53,9 +53,9 @@ CREATE TABLE weather_seasonal_ensemble (
 
 **Data range:** initialization from 2025-06; valid_datetime extends months into the future (through ~May 2026)
 
-### 3. energy_base_ensemble
-Baseline energy ensembles — climatological/reference energy scenarios.
-Provides baseline expectations for energy metrics.
+### 3. energy_base_ensemble  ← SEASONAL energy data (months ahead)
+Seasonal energy ensembles. Older initialization than energy_forecast_ensemble,
+but covers months into the future.
 
 ```sql
 CREATE TABLE energy_base_ensemble (
@@ -74,8 +74,9 @@ CREATE TABLE energy_base_ensemble (
 
 **Data range:** initialization from 2025-09; valid_datetime through ~May 2026
 
-### 4. energy_forecast_ensemble
-Active energy forecast ensembles — the most current forward-looking energy predictions.
+### 4. energy_forecast_ensemble  ← FRESHEST energy data (~14-day horizon)
+Short-range energy forecast ensembles (~336 hours / 14 days).
+Updated frequently — always has the most recent initialization of any energy table.
 
 ```sql
 CREATE TABLE energy_forecast_ensemble (
@@ -184,6 +185,117 @@ Use weather_forecast_ensemble with variable = 'temp_2m'.
 
 ### Forecast vs. baseline comparison
 Compare energy_forecast_ensemble (current forecast) against energy_base_ensemble (baseline/climatology).
+
+### Combining forecast and seasonal/base tables for long-horizon queries
+
+The database has two pairs of tables that follow the same freshness pattern:
+
+| Fresh (short-range) table | Seasonal (long-range) table | Domain |
+|---|---|---|
+| `energy_forecast_ensemble` | `energy_base_ensemble` | Energy (load, gen, GSI, …) |
+| `weather_forecast_ensemble` | `weather_seasonal_ensemble` | Weather (temp, wind, GHI, …) |
+
+**How they relate:**
+- The **forecast** table has the FRESHEST initialization but only covers a short
+  horizon (~336 hours / 14 days for energy, ~234 hours / 10 days for weather).
+- The **seasonal/base** table has an OLDER initialization but extends months into
+  the future.
+- Their initialization times are DIFFERENT — the forecast table's init is always
+  more recent.
+
+**For any query whose time range extends beyond the forecast horizon,
+you MUST combine both tables using UNION ALL:**
+
+1. Use the **forecast** table for its full short-range window (freshest data).
+2. Use the **seasonal/base** table for everything AFTER that window, filtering with
+   `valid_datetime > forecast_init + INTERVAL '336 hours'` (energy) or
+   `valid_datetime > forecast_init + INTERVAL '234 hours'` (weather) to avoid overlap.
+3. Look up each table's latest initialization independently.
+
+**Energy pattern:**
+```sql
+WITH forecast_init AS (
+    SELECT initialization FROM energy_forecast_ensemble
+    WHERE project_name = 'X' AND location = 'Y' AND variable = 'Z'
+    ORDER BY initialization DESC LIMIT 1
+),
+base_init AS (
+    SELECT initialization FROM energy_base_ensemble
+    WHERE project_name = 'X' AND location = 'Y' AND variable = 'Z'
+    ORDER BY initialization DESC LIMIT 1
+),
+combined AS (
+    SELECT valid_datetime, ensemble_path, ensemble_value
+    FROM energy_forecast_ensemble
+    WHERE initialization = (SELECT initialization FROM forecast_init)
+      AND project_name = 'X' AND location = 'Y' AND variable = 'Z'
+    UNION ALL
+    SELECT valid_datetime, ensemble_path, ensemble_value
+    FROM energy_base_ensemble
+    WHERE initialization = (SELECT initialization FROM base_init)
+      AND project_name = 'X' AND location = 'Y' AND variable = 'Z'
+      AND valid_datetime > (SELECT initialization FROM forecast_init) + INTERVAL '336 hours'
+)
+SELECT ... FROM combined GROUP BY ... ORDER BY ... LIMIT ...;
+```
+
+**Weather pattern** (same structure, different tables and horizon):
+```sql
+WITH forecast_init AS (
+    SELECT initialization FROM weather_forecast_ensemble
+    WHERE project_name = 'X' AND location = 'Y' AND variable = 'Z'
+    ORDER BY initialization DESC LIMIT 1
+),
+seasonal_init AS (
+    SELECT initialization FROM weather_seasonal_ensemble
+    WHERE project_name = 'X' AND location = 'Y' AND variable = 'Z'
+    ORDER BY initialization DESC LIMIT 1
+),
+combined AS (
+    SELECT valid_datetime, ensemble_path, ensemble_value
+    FROM weather_forecast_ensemble
+    WHERE initialization = (SELECT initialization FROM forecast_init)
+      AND project_name = 'X' AND location = 'Y' AND variable = 'Z'
+    UNION ALL
+    SELECT valid_datetime, ensemble_path, ensemble_value
+    FROM weather_seasonal_ensemble
+    WHERE initialization = (SELECT initialization FROM seasonal_init)
+      AND project_name = 'X' AND location = 'Y' AND variable = 'Z'
+      AND valid_datetime > (SELECT initialization FROM forecast_init) + INTERVAL '234 hours'
+)
+SELECT ... FROM combined GROUP BY ... ORDER BY ... LIMIT ...;
+```
+
+These patterns apply to **all regions** (ERCOT and PJM).
+
+**When to use which approach:**
+- **Short-range** (next few days / next week): forecast table alone — freshest data.
+- **Seasonal / long-horizon** (next month, next quarter, etc.): COMBINE both tables.
+- **Far-future only** (e.g., "next summer", well beyond forecast horizon):
+  seasonal/base table alone is acceptable.
+
+### Time zones
+All timestamps in the database are stored in UTC (timestamptz). However, users ask
+questions in the LOCAL time of the region they are querying. You MUST convert times
+accordingly, unless the user explicitly says "UTC".
+
+| Region | Local Time Zone | PostgreSQL zone name |
+|--------|----------------|---------------------|
+| ERCOT (Texas) | US Central | 'America/Chicago' |
+| PJM (Mid-Atlantic/Midwest) | US Eastern | 'America/New_York' |
+
+**Rules:**
+1. **SQL output times** — Convert `valid_datetime` to local time in query results so the
+   user sees local hours. Use: `valid_datetime AT TIME ZONE 'America/Chicago'` (ERCOT)
+   or `valid_datetime AT TIME ZONE 'America/New_York'` (PJM). Alias it clearly
+   (e.g., `AS valid_datetime_local` or `AS local_time`).
+2. **User time references** — When the user says "3 PM tomorrow" or "morning hours",
+   interpret that in the region's local time. Convert to UTC for WHERE clauses, e.g.:
+   `valid_datetime >= '2026-02-26 15:00:00 America/Chicago'::timestamptz`
+3. **Presentation** — When describing results, always state times in local time with the
+   zone abbreviation (CT for ERCOT, ET for PJM). Example: "Peak load occurs at 2:00 PM CT".
+4. **Charts** — The x-axis label should indicate the local time zone, e.g., "Hour (CT)" or
+   "Date/Time (ET)".
 
 ### Time-based filtering
 - "next week" → valid_datetime BETWEEN NOW() AND NOW() + INTERVAL '7 days'

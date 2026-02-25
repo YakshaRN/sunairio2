@@ -9,9 +9,21 @@ from __future__ import annotations
 import json
 import logging
 import re
+from datetime import date, datetime
+from decimal import Decimal
 from typing import Any, Optional, List, Dict
 
 import boto3
+
+
+class _SafeEncoder(json.JSONEncoder):
+    """Handle Decimal, date, and datetime values from PostgreSQL results."""
+    def default(self, o):
+        if isinstance(o, Decimal):
+            return float(o)
+        if isinstance(o, (date, datetime)):
+            return o.isoformat()
+        return super().default(o)
 
 import config
 from schema import SYSTEM_PROMPT
@@ -184,12 +196,12 @@ def synthesize_answer(conversation_history: List[Dict], query_result: dict, orig
     if len(rows) > 100:
         data_summary = (
             f"Columns: {columns}\n"
-            f"First 50 rows:\n{json.dumps(rows[:50])}\n"
+            f"First 50 rows:\n{json.dumps(rows[:50], cls=_SafeEncoder)}\n"
             f"... ({query_result['row_count']} total rows, showing first 50) ...\n"
-            f"Last 10 rows:\n{json.dumps(rows[-10:])}"
+            f"Last 10 rows:\n{json.dumps(rows[-10:], cls=_SafeEncoder)}"
         )
     else:
-        data_summary = f"Columns: {columns}\nRows ({len(rows)}):\n{json.dumps(rows)}"
+        data_summary = f"Columns: {columns}\nRows ({len(rows)}):\n{json.dumps(rows, cls=_SafeEncoder)}"
 
     synthesis_message = {
         "role": "user",
