@@ -100,6 +100,36 @@ def _references_main_table(cleaned_upper: str) -> bool:
     return any(table in cleaned_upper for table in _MAIN_TABLES)
 
 
+def _ensure_outer_limit(sql: str) -> str:
+    """
+    Ensure the outermost SELECT has a LIMIT so the query cannot return unbounded rows.
+    Only applied when the query touches main forecast tables. If the query ends with
+    LIMIT n, cap n at MAX_QUERY_ROWS; if it has no LIMIT at the end, append LIMIT MAX_QUERY_ROWS.
+    """
+    cleaned = re.sub(r'--.*?$', ' ', sql, flags=re.MULTILINE)
+    cleaned = re.sub(r'/\*.*?\*/', ' ', cleaned, flags=re.DOTALL)
+    cleaned_upper = cleaned.strip().upper()
+    if not _references_main_table(cleaned_upper):
+        return sql
+
+    # Work on original sql (preserve case, comments for execution)
+    trimmed = sql.strip().rstrip(';').strip()
+    if not trimmed:
+        return sql
+
+    # Does the outer SELECT already end with LIMIT <digits>?
+    match = re.search(r'\bLIMIT\s+(\d+)\s*$', trimmed, re.IGNORECASE)
+    if match:
+        n = int(match.group(1))
+        if n <= config.MAX_QUERY_ROWS:
+            return sql
+        # Replace with capped value
+        return re.sub(r'\bLIMIT\s+\d+\s*$', f' LIMIT {config.MAX_QUERY_ROWS}', trimmed, flags=re.IGNORECASE)
+
+    # No LIMIT on outer SELECT — append it
+    return trimmed + f' LIMIT {config.MAX_QUERY_ROWS}'
+
+
 def _validate_sql(sql: str):
     """
     Validate SQL for safety and scope before execution.
@@ -197,6 +227,7 @@ def execute_query(sql: str, params: Optional[dict] = None, request_id: Optional[
     Returns:
         {"columns": [...], "rows": [[...], ...], "row_count": int, "truncated": bool}
     """
+    sql = _ensure_outer_limit(sql)
     _validate_sql(sql)
 
     with get_connection() as conn:

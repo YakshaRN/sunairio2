@@ -292,16 +292,30 @@ accordingly, unless the user explicitly says "UTC".
 2. **User time references** — When the user says "3 PM tomorrow" or "morning hours",
    interpret that in the region's local time. Convert to UTC for WHERE clauses, e.g.:
    `valid_datetime >= '2026-02-26 15:00:00 America/Chicago'::timestamptz`
-3. **Presentation** — When describing results, always state times in local time with the
+3. **Relative dates (CRITICAL)** — NEVER use `CURRENT_DATE`, `NOW()`, `LOCALTIME`, or
+   any SQL date/time function to compute day boundaries. These run in UTC on the server
+   and produce wrong boundaries for local time. Instead, use the current local dates
+   provided in the "CURRENT DATE/TIME" section below to compute the actual calendar date,
+   then write EXPLICIT timezone-qualified literals. Example for ERCOT "tomorrow" when
+   today is 2026-02-26 CT:
+     `valid_datetime >= '2026-02-27 00:00:00 America/Chicago'::timestamptz`
+     `valid_datetime <  '2026-02-28 00:00:00 America/Chicago'::timestamptz`
+   Same approach for PJM with `'America/New_York'`.
+4. **Presentation** — When describing results, always state times in local time with the
    zone abbreviation (CT for ERCOT, ET for PJM). Example: "Peak load occurs at 2:00 PM CT".
-4. **Charts** — The x-axis label should indicate the local time zone, e.g., "Hour (CT)" or
+5. **Charts** — The x-axis label should indicate the local time zone, e.g., "Hour (CT)" or
    "Date/Time (ET)".
 
 ### Time-based filtering
-- "next week" → valid_datetime BETWEEN NOW() AND NOW() + INTERVAL '7 days'
-- "July" → EXTRACT(MONTH FROM valid_datetime) = 7
-- "Q2" → EXTRACT(MONTH FROM valid_datetime) IN (4,5,6)
-- "Q3" → EXTRACT(MONTH FROM valid_datetime) IN (7,8,9)
+Always use explicit timezone-qualified date literals (see "CURRENT DATE/TIME" section
+for today's actual date in each region). Substitute the correct zone for the region.
+- "today" → use the local date from CURRENT DATE/TIME, e.g.:
+  `valid_datetime >= '2026-02-26 00:00:00 America/Chicago'::timestamptz AND valid_datetime < '2026-02-27 00:00:00 America/Chicago'::timestamptz`
+- "tomorrow" → local date + 1 day
+- "next week" → local date to local date + 7 days
+- "July" → EXTRACT(MONTH FROM valid_datetime AT TIME ZONE 'America/Chicago') = 7
+- "Q2" → EXTRACT(MONTH FROM valid_datetime AT TIME ZONE 'America/Chicago') IN (4,5,6)
+- "Q3" → EXTRACT(MONTH FROM valid_datetime AT TIME ZONE 'America/Chicago') IN (7,8,9)
 
 ### Region mapping (natural language → location values)
 - "Texas" / "ERCOT" → project_name = 'ercot_generic'
@@ -328,7 +342,10 @@ accordingly, unless the user explicitly says "UTC".
    - project_name AND location AND variable AND a time range (initialization or valid_datetime)
    - NEVER do a full table scan. Every query MUST have WHERE clauses on these columns.
 2. Always use GROUP BY with aggregations on ensemble_value (AVG, percentiles, etc.)
-3. Use LIMIT to cap result rows (max 5000)
+3. Use LIMIT to cap result rows (max 5000). Prefer the smallest LIMIT that fits the question:
+   - 1 day hourly → LIMIT 24; 1 week hourly → LIMIT 168; 1 month hourly → LIMIT 744
+   - Single value or peak/summary → LIMIT 1 or LIMIT 10
+   - Always put LIMIT on the final SELECT that returns the result (not only in subqueries).
 4. Only generate SELECT statements (read-only database)
 5. Use proper timestamptz comparisons with UTC literals (e.g., '2026-02-17T00:00:00+00')
 6. When the user asks for "forecast", use the latest initialization by default
@@ -339,12 +356,12 @@ accordingly, unless the user explicitly says "UTC".
     (SELECT initialization FROM table WHERE project_name=X AND location=Y AND variable=Z ORDER BY initialization DESC LIMIT 1)
     NEVER use MAX(initialization) without full WHERE clause filters — this causes catastrophically slow full table scans
 11. When querying multiple locations or variables, prefer separate CTEs or UNION ALL with each having its own filtered subquery for latest initialization
-12. Keep time ranges narrow — prefer "next 7 days" or specific date ranges over unbounded queries
+12. Keep time ranges narrow — prefer "next 7 days" or specific date ranges over unbounded queries. Never query without a bounded valid_datetime (or initialization) range.
 13. For cross-table joins (e.g., weather + energy), always filter each table independently first using CTEs, then join the smaller result sets
 """
 
 
-SYSTEM_PROMPT = """You are an expert energy and weather forecasting analyst with deep SQL knowledge.
+_PROMPT_TEMPLATE = """You are an expert energy and weather forecasting analyst with deep SQL knowledge.
 You help users query an Amazon Aurora PostgreSQL database containing probabilistic ensemble forecasts
 for weather and energy across ERCOT (Texas) and PJM (Mid-Atlantic/Midwest) regions.
 
@@ -429,6 +446,35 @@ After receiving query results, you will be asked to synthesize. Respond with:
 
 Set "chart" to null if no visualization is appropriate.
 
+## CURRENT DATE/TIME (for resolving relative references like "today", "tomorrow", "next week")
+- ERCOT local (CT): __ERCOT_NOW__
+- PJM local (ET):   __PJM_NOW__
+
+When the user says "today", "tomorrow", "next week", etc., compute the actual calendar
+date from the values above and use EXPLICIT date literals in SQL. Examples for ERCOT
+if today is 2026-02-26 CT:
+- "today"    → valid_datetime >= '2026-02-26 00:00:00 America/Chicago'::timestamptz
+               AND valid_datetime < '2026-02-27 00:00:00 America/Chicago'::timestamptz
+- "tomorrow" → valid_datetime >= '2026-02-27 00:00:00 America/Chicago'::timestamptz
+               AND valid_datetime < '2026-02-28 00:00:00 America/Chicago'::timestamptz
+
+NEVER use CURRENT_DATE, CURRENT_TIMESTAMP, NOW(), LOCALTIME, or any SQL date function
+to compute day boundaries. Always resolve the date yourself and write literal values.
+
 ## CONVERSATION CONTEXT
 Maintain awareness of previous questions to handle follow-ups like "now show me that for Houston" or "compare that with wind energy".
 """.format(schema=SCHEMA_CONTEXT)
+
+
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+def get_system_prompt() -> str:
+    """Build the system prompt with current local dates injected."""
+    now_ct = datetime.now(ZoneInfo("America/Chicago"))
+    now_et = datetime.now(ZoneInfo("America/New_York"))
+    return (
+        _PROMPT_TEMPLATE
+        .replace("__ERCOT_NOW__", now_ct.strftime("%Y-%m-%d %H:%M %Z"))
+        .replace("__PJM_NOW__", now_et.strftime("%Y-%m-%d %H:%M %Z"))
+    )
