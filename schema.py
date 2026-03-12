@@ -358,6 +358,7 @@ for today's actual date in each region). Substitute the correct zone for the reg
 11. When querying multiple locations or variables, prefer separate CTEs or UNION ALL with each having its own filtered subquery for latest initialization
 12. Keep time ranges narrow — prefer "next 7 days" or specific date ranges over unbounded queries. Never query without a bounded valid_datetime (or initialization) range.
 13. For cross-table joins (e.g., weather + energy), always filter each table independently first using CTEs, then join the smaller result sets
+14. For month- or quarter-level questions (e.g. "load for April 2026"), prefer daily aggregation (GROUP BY date) so the query returns ~30 rows instead of 720+ hourly rows — this runs much faster and is usually what the user needs
 """
 
 

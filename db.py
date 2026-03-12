@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from decimal import Decimal
 from typing import Optional, Dict
 
@@ -244,9 +245,12 @@ def execute_query(sql: str, params: Optional[dict] = None, request_id: Optional[
                 _active_queries[request_id] = backend_pid
 
             try:
+                t0 = time.monotonic()
                 cur.execute(sql, params or {})
                 columns = [desc[0] for desc in cur.description]
                 rows = cur.fetchmany(config.MAX_QUERY_ROWS + 1)
+                elapsed = time.monotonic() - t0
+                logger.info("Query executed in %.2fs, rows=%d", elapsed, len(rows))
 
                 truncated = len(rows) > config.MAX_QUERY_ROWS
                 if truncated:
