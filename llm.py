@@ -26,7 +26,7 @@ class _SafeEncoder(json.JSONEncoder):
         return super().default(o)
 
 import config
-from schema import SYSTEM_PROMPT
+from schema import get_system_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +70,7 @@ def _build_request_body(messages: List[Dict], temperature: float, max_tokens: in
             nova_messages.append({"role": msg["role"], "content": content})
 
         return json.dumps({
-            "system": [{"text": SYSTEM_PROMPT}],
+            "system": [{"text": get_system_prompt()}],
             "messages": nova_messages,
             "inferenceConfig": {
                 "maxTokens": max_tokens,
@@ -83,7 +83,7 @@ def _build_request_body(messages: List[Dict], temperature: float, max_tokens: in
             "anthropic_version": "bedrock-2023-05-31",
             "max_tokens": max_tokens,
             "temperature": temperature,
-            "system": SYSTEM_PROMPT,
+            "system": get_system_prompt(),
             "messages": messages,
         })
 
@@ -97,7 +97,7 @@ def _build_request_body(messages: List[Dict], temperature: float, max_tokens: in
             nova_messages.append({"role": msg["role"], "content": content})
 
         return json.dumps({
-            "system": [{"text": SYSTEM_PROMPT}],
+            "system": [{"text": get_system_prompt()}],
             "messages": nova_messages,
             "inferenceConfig": {
                 "maxTokens": max_tokens,
