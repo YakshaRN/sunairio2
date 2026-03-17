@@ -6,7 +6,7 @@ Under NO circumstances can any data be modified or deleted.
 - SQL is validated against a comprehensive blocklist before execution
 - Only SELECT and WITH (CTE) statements are permitted
 - Queries touching the main forecast tables MUST include WHERE and LIMIT clauses
-- SELECT * is never allowed
+- SELECT * directly from main forecast tables is not allowed (CTEs are fine)
 - Queries can be cancelled via their backend PID
 """
 
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import re
+import sys
 import time
 from decimal import Decimal
 from typing import Optional, Dict
@@ -158,7 +159,10 @@ def _validate_sql(sql: str):
         raise ValueError("BLOCKED: Only SELECT / WITH queries are allowed. No data modification permitted.")
 
     # ── Security check 2: Forbidden keyword blocklist ─────────────────
-    tokens = re.findall(r'[A-Z_]+', cleaned_upper)
+    # Strip string literals first so domain terms inside quotes
+    # (e.g., 'load', 'comment', 'security') are not false-positived
+    no_strings = re.sub(r"'[^']*'", '', cleaned_upper)
+    tokens = re.findall(r'[A-Z_]+', no_strings)
     for token in tokens:
         if token in _FORBIDDEN_KEYWORDS:
             raise ValueError(f"BLOCKED: Forbidden keyword '{token}' detected. No data modification permitted.")
@@ -189,8 +193,9 @@ def _validate_sql(sql: str):
     # are not subject to them.
     if _references_main_table(cleaned_upper):
 
-        # No SELECT * — forces the LLM to select only what it needs
-        if re.search(r'SELECT\s+\*', cleaned_upper):
+        # No SELECT * directly from the billion-row tables (SELECT * from CTEs is fine)
+        _select_star_table_pat = r'SELECT\s+\*\s+FROM\s+(' + '|'.join(_MAIN_TABLES) + r')'
+        if re.search(_select_star_table_pat, cleaned_upper):
             raise ValueError(
                 "BLOCKED: SELECT * is not permitted on forecast tables. "
                 "Please select specific columns."
@@ -270,11 +275,19 @@ def execute_query(sql: str, params: Optional[dict] = None, request_id: Optional[
                             serialized_row.append(val)
                     serialized_rows.append(serialized_row)
 
+                data_volume = sys.getsizeof(serialized_rows)
+                for row in serialized_rows:
+                    data_volume += sys.getsizeof(row)
+                    for val in row:
+                        data_volume += sys.getsizeof(val) if val is not None else 0
+
                 return {
                     "columns": columns,
                     "rows": serialized_rows,
                     "row_count": len(serialized_rows),
                     "truncated": truncated,
+                    "query_time_ms": round(elapsed * 1000, 1),
+                    "data_volume_bytes": data_volume,
                 }
             finally:
                 if request_id:

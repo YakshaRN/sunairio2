@@ -274,6 +274,59 @@
         }
         .btn-download:hover { border-color: var(--accent); color: var(--text-primary); }
 
+        /* Metrics dropdown */
+        .metrics-toggle {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            padding: 5px 10px;
+            cursor: pointer;
+            font-size: 11px;
+            color: var(--text-muted);
+            transition: all 0.2s;
+            margin-right: 8px;
+            margin-bottom: 8px;
+        }
+        .metrics-toggle:hover { border-color: var(--accent); color: var(--text-secondary); }
+        .metrics-toggle.active { border-color: var(--accent); color: var(--accent); background: var(--accent-glow); }
+        .metrics-toggle svg { width: 13px; height: 13px; }
+        .metrics-toggle .chevron {
+            transition: transform 0.2s;
+            width: 10px; height: 10px;
+        }
+        .metrics-toggle.active .chevron { transform: rotate(180deg); }
+
+        .metrics-panel {
+            display: none;
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            padding: 10px 14px;
+            margin: 4px 0 10px;
+            gap: 0;
+        }
+        .metrics-panel.visible { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 20px; }
+        .metrics-item {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+        .metrics-item .label {
+            font-size: 10px;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            font-weight: 600;
+        }
+        .metrics-item .value {
+            font-size: 13px;
+            color: var(--text-secondary);
+            font-family: 'JetBrains Mono', 'Fira Code', monospace;
+        }
+
         /* Typing indicator */
         .typing { display: flex; gap: 4px; padding: 8px 0; }
         .typing span {
@@ -577,6 +630,11 @@ function addAssistantMessage(response) {
     // Main answer
     html += `<div class="answer-text">${formatAnswer(response.answer)}</div>`;
 
+    // Metrics toggle
+    if (response.metrics) {
+        html += renderMetrics(response.metrics, msgId);
+    }
+
     // Toggle buttons row
     let toggles = '';
     if (response.sql) {
@@ -657,6 +715,39 @@ function addAssistantMessage(response) {
     }
 
     scrollToBottom();
+}
+
+// ─── Format bytes to human-readable ──────────────────────────────────
+function formatBytes(bytes) {
+    if (bytes == null) return '—';
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+}
+
+function formatDuration(ms) {
+    if (ms == null) return '—';
+    if (ms < 1000) return ms.toFixed(0) + ' ms';
+    return (ms / 1000).toFixed(2) + ' s';
+}
+
+// ─── Render metrics dropdown ─────────────────────────────────────────
+function renderMetrics(metrics, msgId) {
+    const panelId = `metrics-${msgId}`;
+    let html = `<button class="metrics-toggle" onclick="toggleSection(this, '${panelId}')">`;
+    html += `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20V10M18 20V4M6 20v-4"/></svg>`;
+    html += `Performance`;
+    html += `<svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>`;
+    html += `</button>`;
+
+    html += `<div class="metrics-panel" id="${panelId}">`;
+    html += `<div class="metrics-item"><span class="label">Total Time</span><span class="value">${formatDuration(metrics.total_time_ms)}</span></div>`;
+    html += `<div class="metrics-item"><span class="label">Query Time</span><span class="value">${formatDuration(metrics.query_time_ms)}</span></div>`;
+    html += `<div class="metrics-item"><span class="label">Rows Returned</span><span class="value">${metrics.row_count != null ? metrics.row_count.toLocaleString() : '—'}</span></div>`;
+    html += `<div class="metrics-item"><span class="label">Data Volume</span><span class="value">${formatBytes(metrics.data_volume_bytes)}</span></div>`;
+    html += `</div>`;
+
+    return html;
 }
 
 // ─── Format answer text ──────────────────────────────────────────────
@@ -836,37 +927,6 @@ async function stopRequest() {
     document.getElementById('question-input').focus();
 }
 
-// ─── Show/hide stop button ───────────────────────────────────────────────
-function showStopButton() {
-    document.getElementById('btn-send').classList.add('hidden');
-    document.getElementById('btn-stop').classList.add('visible');
-}
-function hideStopButton() {
-    document.getElementById('btn-stop').classList.remove('visible');
-    document.getElementById('btn-send').classList.remove('hidden');
-}
-
-// ─── Stop request ──────────────────────────────────────────────────────
-async function stopRequest() {
-    if (!isLoading || !currentRequestId) return;
-    if (currentAbortController) currentAbortController.abort();
-    try {
-        await fetch('/api/cancel', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ request_id: currentRequestId }),
-        });
-    } catch (e) { /* ignore */ }
-    removeLoadingMessage();
-    addAssistantMessage({ answer: 'Request stopped.' });
-    isLoading = false;
-    currentRequestId = null;
-    currentAbortController = null;
-    hideStopButton();
-    document.getElementById('btn-send').disabled = false;
-    document.getElementById('question-input').focus();
-}
-
 // ─── Submit ──────────────────────────────────────────────────────────────
 async function submitQuestion() {
     const input = document.getElementById('question-input');
@@ -886,15 +946,54 @@ async function submitQuestion() {
     addLoadingMessage();
 
     try {
-        const res = await fetch('/api/query', {
+        const res = await fetch('/api/query/stream', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ question, session_id: sessionId, request_id: currentRequestId }),
             signal: currentAbortController.signal,
         });
-        const data = await res.json();
-        removeLoadingMessage();
-        addAssistantMessage(data);
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let sqlShown = false;
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+
+            const lines = buffer.split('\n');
+            buffer = lines.pop();
+
+            for (const line of lines) {
+                if (!line.startsWith('data: ')) continue;
+                try {
+                    const evt = JSON.parse(line.slice(6));
+                    if (evt.event === 'sql_ready' && !sqlShown) {
+                        const el = document.getElementById('loading-msg');
+                        if (el) {
+                            const body = el.querySelector('.message-content');
+                            if (body) body.innerHTML = '<div class="answer-text" style="opacity:0.6">Running query...</div>';
+                        }
+                        sqlShown = true;
+                    } else if (evt.event === 'data_ready') {
+                        const el = document.getElementById('loading-msg');
+                        if (el) {
+                            const body = el.querySelector('.message-content');
+                            if (body) body.innerHTML = `<div class="answer-text" style="opacity:0.6">Analyzing ${evt.row_count} rows...</div>`;
+                        }
+                    } else if (evt.event === 'complete') {
+                        removeLoadingMessage();
+                        addAssistantMessage(evt);
+                    } else if (evt.event === 'error') {
+                        removeLoadingMessage();
+                        addAssistantMessage({ answer: evt.message, error: evt.message });
+                    }
+                } catch (parseErr) { /* skip malformed events */ }
+            }
+        }
+        if (!document.getElementById('loading-msg')) { /* already handled */ }
+        else { removeLoadingMessage(); }
     } catch (err) {
         if (err.name === 'AbortError') return;
         removeLoadingMessage();
@@ -935,10 +1034,6 @@ async function checkHealth() {
 checkHealth();
 setInterval(checkHealth, 60000);
 document.getElementById('question-input').focus();
-</script>
-</body>
-</html>
-us();
 </script>
 </body>
 </html>
